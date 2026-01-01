@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+venv/
+env/
+.env
+
+# Playwright / Browser Data
+user_data/
+.gemini/
+
+# IDEs
+.vscode/
+.idea/
+.DS_Store
