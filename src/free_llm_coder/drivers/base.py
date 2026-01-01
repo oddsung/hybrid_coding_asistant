@@ -24,8 +24,7 @@ class BaseDriver(ABC):
                 "--disable-setuid-sandbox",
                 "--disable-blink-features=AutomationControlled" 
             ],
-            ignore_default_args=["--enable-automation"],
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ignore_default_args=["--enable-automation"]
         )
         
         if self.browser.pages:
@@ -66,8 +65,34 @@ class BaseDriver(ABC):
         """Check if the usage limit has been reached."""
         pass
 
-    def wait_for_response(self, timeout: int = 30) -> str:
+
+
+    def wait_for_response(self, timeout: int = 120) -> str:
         """Wait for response generation to complete and return it."""
-        # Simple polling mechanism; child classes can override with smarter logic
-        time.sleep(5)  # Initial wait
+        start_time = time.time()
+        last_text_len = 0
+        stable_count = 0
+        
+        while (time.time() - start_time) < timeout:
+            if self.is_streaming_finished():
+                # Double check stability
+                current_text = self.get_last_response()
+                if len(current_text) == last_text_len and len(current_text) > 0:
+                    stable_count += 1
+                else:
+                    stable_count = 0
+                    last_text_len = len(current_text)
+                
+                # If finished signal is distinct, we can return early
+                # But to be safe, wait for a bit of stability
+                if stable_count > 2: 
+                    return current_text
+            
+            time.sleep(1)
+            
         return self.get_last_response()
+
+    @abstractmethod
+    def is_streaming_finished(self) -> bool:
+        """Check if the LLM has finished streaming the response."""
+        pass

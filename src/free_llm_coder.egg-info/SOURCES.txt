@@ -1,0 +1,17 @@
+pyproject.toml
+src/free_llm_coder/__init__.py
+src/free_llm_coder/main.py
+src/free_llm_coder.egg-info/PKG-INFO
+src/free_llm_coder.egg-info/SOURCES.txt
+src/free_llm_coder.egg-info/dependency_links.txt
+src/free_llm_coder.egg-info/entry_points.txt
+src/free_llm_coder.egg-info/requires.txt
+src/free_llm_coder.egg-info/top_level.txt
+src/free_llm_coder/context/__init__.py
+src/free_llm_coder/context/context.py
+src/free_llm_coder/drivers/__init__.py
+src/free_llm_coder/drivers/base.py
+src/free_llm_coder/drivers/chatgpt.py
+src/free_llm_coder/drivers/gemini.py
+src/free_llm_coder/manager/__init__.py
+src/free_llm_coder/manager/service_manager.py

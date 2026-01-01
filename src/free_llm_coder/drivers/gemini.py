@@ -27,3 +27,13 @@ class GeminiDriver(BaseDriver):
         # Check for textual indicators
         content = self.page.content()
         return "reached your limit" in content or "capacity" in content
+
+    def is_streaming_finished(self) -> bool:
+        selectors = self.config['selectors']
+        submit_btn = selectors['submit_button']
+        
+        # Gemini: Check if send button is visible and enabled
+        btn = self.page.query_selector(submit_btn)
+        if btn and btn.is_visible() and not btn.is_disabled():
+             return True
+        return False
