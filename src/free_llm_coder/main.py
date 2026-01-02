@@ -26,7 +26,37 @@ def load_config():
         _init_config()
         
     with open(CONFIG_PATH, "r") as f:
-        return yaml.safe_load(f)
+        config = yaml.safe_load(f)
+
+    # Auto-inject or update Qwen config
+    services = config.get('services', [])
+    qwen_cfg = next((s for s in services if s['name'] == 'qwen'), None)
+    
+    qwen_defaults = {
+        'name': 'qwen',
+        'url': 'https://chat.qwen.ai',
+        'priority': 3,
+        'selectors': {
+            'input_area': '#chat-input',
+            'submit_button': ".send-button",
+            'response_container': ".qwen-markdown",
+            'error_message': None
+        }
+    }
+
+    if not qwen_cfg:
+        console.print("[blue]Adding Qwen to configuration...[/blue]")
+        services.append(qwen_defaults)
+        config['services'] = services
+        with open(CONFIG_PATH, "w") as f:
+            yaml.dump(config, f)
+    elif qwen_cfg['selectors'].get('response_container') != ".qwen-markdown":
+        console.print("[blue]Updating Qwen configuration selectors...[/blue]")
+        qwen_cfg['selectors'] = qwen_defaults['selectors']
+        with open(CONFIG_PATH, "w") as f:
+            yaml.dump(config, f)
+            
+    return config
 
 def _init_config():
     """Create default config file in app dir."""
@@ -60,6 +90,17 @@ def _init_config():
                     'response_container': "model-response",
                     'limit_message': "You have reached your limit"
                 }
+            },
+            {
+                'name': 'qwen',
+                'url': 'https://chat.qwen.ai',
+                'priority': 3,
+                'selectors': {
+                    'input_area': '#chat-input',
+                    'submit_button': ".send-button",
+                    'response_container': ".assistant-message-content",
+                    'error_message': None
+                }
             } 
             # Deepseek omitted for brevity, can be added
         ],
@@ -84,7 +125,8 @@ def init():
 
 @app.command()
 def chat(
-    target_dir: str = typer.Option(".", "--dir", "-d", help="Target project directory to analyze")
+    target_dir: str = typer.Option(".", "--dir", "-d", help="Target project directory to analyze"),
+    service: str = typer.Option(None, "--service", "-s", help="Preferred LLM service (chatgpt, gemini, qwen)")
 ):
     """
     Start the Free LLM Coder assistant (Interactive Mode).
@@ -92,11 +134,13 @@ def chat(
     config = load_config()
     console.print(Panel.fit("Welcome to Free LLM Coder!", style="bold green"))
     console.print(f"[dim]Target Directory: {Path(target_dir).resolve()}[/dim]")
+    if service:
+        console.print(f"[dim]Preferred Service: {service}[/dim]")
 
     # Initialize Managers
     try:
         ctx_mgr = ContextManager(root_path=target_dir)
-        svc_mgr = ServiceManager(config)
+        svc_mgr = ServiceManager(config, preferred_service=service)
     except Exception as e:
         console.print(f"[red]Initialization Error: {e}[/red]")
         raise typer.Exit(code=1)

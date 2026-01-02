@@ -2,16 +2,31 @@ from typing import List, Optional, Dict
 from ..drivers.base import BaseDriver
 from ..drivers.chatgpt import ChatGPTDriver
 from ..drivers.gemini import GeminiDriver
+from ..drivers.qwen import QwenDriver
 # from ..drivers.deepseek import DeepSeekDriver # Future implementation
 
 class ServiceManager:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, preferred_service: Optional[str] = None):
         self.config = config
-        self.services_config = sorted(config['services'], key=lambda x: x['priority'])
+        
+        # Sort by priority first
+        services = sorted(config['services'], key=lambda x: x['priority'])
+        
+        # If preferred_service is specified, move it to the front
+        if preferred_service:
+            preferred = next((s for s in services if s['name'] == preferred_service), None)
+            if preferred:
+                services.remove(preferred)
+                services.insert(0, preferred)
+            else:
+                print(f"[Warning] Preferred service '{preferred_service}' not found in configuration. Using default order.")
+                
+        self.services_config = services
         self.drivers: Dict[str, BaseDriver] = {}
         self.active_service_index = 0
         self.user_data_base = config['browser'].get('user_data_dir', './user_data')
         self.headless = config['browser'].get('headless', False)
+
 
     def _create_driver(self, service_cfg: dict) -> BaseDriver:
         name = service_cfg['name']
@@ -21,6 +36,8 @@ class ServiceManager:
             return ChatGPTDriver(service_cfg, user_data_dir, self.headless)
         elif name == 'gemini':
             return GeminiDriver(service_cfg, user_data_dir, self.headless)
+        elif name == 'qwen':
+            return QwenDriver(service_cfg, user_data_dir, self.headless)
         elif name == 'deepseek':
             # return DeepSeekDriver(service_cfg, user_data_dir, self.headless)
             pass
