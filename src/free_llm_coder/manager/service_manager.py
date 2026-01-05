@@ -3,6 +3,9 @@ from ..drivers.base import BaseDriver
 from ..drivers.chatgpt import ChatGPTDriver
 from ..drivers.gemini import GeminiDriver
 from ..drivers.qwen import QwenDriver
+from ..drivers.grok import GrokDriver
+from ..drivers.deepseek import DeepSeekDriver
+from playwright.sync_api import sync_playwright, Playwright
 # from ..drivers.deepseek import DeepSeekDriver # Future implementation
 
 class ServiceManager:
@@ -26,6 +29,13 @@ class ServiceManager:
         self.active_service_index = 0
         self.user_data_base = config['browser'].get('user_data_dir', './user_data')
         self.headless = config['browser'].get('headless', False)
+        self.playwright: Optional[Playwright] = None
+
+
+    def _get_playwright(self) -> Playwright:
+        if not self.playwright:
+            self.playwright = sync_playwright().start()
+        return self.playwright
 
 
     def _create_driver(self, service_cfg: dict) -> BaseDriver:
@@ -38,9 +48,10 @@ class ServiceManager:
             return GeminiDriver(service_cfg, user_data_dir, self.headless)
         elif name == 'qwen':
             return QwenDriver(service_cfg, user_data_dir, self.headless)
+        elif name == 'grok':
+            return GrokDriver(service_cfg, user_data_dir, self.headless)
         elif name == 'deepseek':
-            # return DeepSeekDriver(service_cfg, user_data_dir, self.headless)
-            pass
+            return DeepSeekDriver(service_cfg, user_data_dir, self.headless)
         
         raise ValueError(f"Unknown service driver: {name}")
 
@@ -55,7 +66,7 @@ class ServiceManager:
         if name not in self.drivers:
             print(f"[System] Initializing driver for {name}...")
             driver = self._create_driver(current_cfg)
-            driver.start_browser()
+            driver.start_browser(self._get_playwright())
             driver.navigate()
             self.drivers[name] = driver
 
@@ -65,11 +76,11 @@ class ServiceManager:
         """Switch to the next available service."""
         print(f"[System] API limit or error detected. Rotating service from {self.services_config[self.active_service_index]['name']}...")
         
-        # Close current driver to save resources (optional, maybe keep it open if we want to retry later)
+        # Close current driver to release browser locks and resources
         current_name = self.services_config[self.active_service_index]['name']
         if current_name in self.drivers:
-            # self.drivers[current_name].close() # Optional: keep open for manual inspection
-            pass
+            self.drivers[current_name].close()
+            del self.drivers[current_name]
 
         self.active_service_index += 1
         
@@ -78,9 +89,13 @@ class ServiceManager:
             # Reset or handle complete failure
             return
 
-        new_driver = self.get_active_driver()
-        print(f"[System] Switched to {self.services_config[self.active_service_index]['name']}.")
+        # Note: We don't initialize the next driver here to avoid duplicate initialization 
+        # when called from main.py's continue loop.
+        print(f"[System] Will switch to {self.services_config[self.active_service_index]['name']}.")
 
     def close_all(self):
         for driver in self.drivers.values():
             driver.close()
+        if self.playwright:
+            self.playwright.stop()
+            self.playwright = None

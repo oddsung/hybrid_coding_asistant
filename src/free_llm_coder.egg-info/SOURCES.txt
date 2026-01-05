@@ -12,7 +12,9 @@ src/free_llm_coder/context/context.py
 src/free_llm_coder/drivers/__init__.py
 src/free_llm_coder/drivers/base.py
 src/free_llm_coder/drivers/chatgpt.py
+src/free_llm_coder/drivers/deepseek.py
 src/free_llm_coder/drivers/gemini.py
+src/free_llm_coder/drivers/grok.py
 src/free_llm_coder/drivers/qwen.py
 src/free_llm_coder/manager/__init__.py
 src/free_llm_coder/manager/service_manager.py

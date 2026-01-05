@@ -12,8 +12,8 @@ class BaseDriver(ABC):
         self.browser: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
 
-    def start_browser(self):
-        self.playwright = sync_playwright().start()
+    def start_browser(self, playwright: Playwright):
+        self.playwright = playwright
         # Use persistent context to save login session
         self.browser = self.playwright.chromium.launch_persistent_context(
             user_data_dir=self.user_data_dir,
@@ -47,8 +47,7 @@ class BaseDriver(ABC):
     def close(self):
         if self.browser:
             self.browser.close()
-        if self.playwright:
-            self.playwright.stop()
+        # Do NOT stop playwright here, as it might be shared
 
     @abstractmethod
     def send_message(self, message: str):

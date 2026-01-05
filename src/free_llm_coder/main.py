@@ -30,8 +30,6 @@ def load_config():
 
     # Auto-inject or update Qwen config
     services = config.get('services', [])
-    qwen_cfg = next((s for s in services if s['name'] == 'qwen'), None)
-    
     qwen_defaults = {
         'name': 'qwen',
         'url': 'https://chat.qwen.ai',
@@ -43,16 +41,59 @@ def load_config():
             'error_message': None
         }
     }
+    
+    # Grok defaults
+    grok_defaults = {
+        'name': 'grok',
+        'url': 'https://grok.com',
+        'priority': 4,
+        'selectors': {
+            'input_area': 'textarea',
+            'submit_button': 'button.group.flex.flex-col.justify-center.rounded-full',
+            'response_container': 'div[data-testid="messageGroup"], div.message-content',
+            'error_message': None
+        }
+    }
 
-    if not qwen_cfg:
-        console.print("[blue]Adding Qwen to configuration...[/blue]")
-        services.append(qwen_defaults)
+    # DeepSeek defaults
+    deepseek_defaults = {
+        'name': 'deepseek',
+        'url': 'https://chat.deepseek.com',
+        'priority': 5,
+        'selectors': {
+            'input_area': 'textarea',
+            'submit_button': 'div[role="button"]:has(path)', # Icon based
+            'response_container': '.ds-markdown',
+            'error_message': None
+        }
+    }
+
+    modified = False
+    for service_defaults in [qwen_defaults, grok_defaults, deepseek_defaults]:
+        name = service_defaults['name']
+        cfg = next((s for s in services if s['name'] == name), None)
+        if not cfg:
+            console.print(f"[blue]Adding {name.capitalize()} to configuration...[/blue]")
+            services.append(service_defaults)
+            modified = True
+        else:
+            # Proactively update selectors if they differ significantly (e.g. key missing or specific value changed)
+            # For Grok, always update if it's the old data-testid selector
+            if name == 'grok' and 'data-testid' in cfg['selectors'].get('input_area', ''):
+                console.print(f"[blue]Updating {name.capitalize()} configuration for better stability...[/blue]")
+                cfg['selectors'] = service_defaults['selectors']
+                modified = True
+            elif name == 'deepseek' and (not cfg['selectors'].get('submit_button') or 'svg' in cfg['selectors'].get('submit_button')):
+                console.print(f"[blue]Updating {name.capitalize()} configuration for better stability...[/blue]")
+                cfg['selectors'] = service_defaults['selectors']
+                modified = True
+            elif name == 'qwen' and cfg['selectors'].get('response_container') != ".qwen-markdown":
+                console.print(f"[blue]Updating {name.capitalize()} configuration...[/blue]")
+                cfg['selectors'] = service_defaults['selectors']
+                modified = True
+
+    if modified:
         config['services'] = services
-        with open(CONFIG_PATH, "w") as f:
-            yaml.dump(config, f)
-    elif qwen_cfg['selectors'].get('response_container') != ".qwen-markdown":
-        console.print("[blue]Updating Qwen configuration selectors...[/blue]")
-        qwen_cfg['selectors'] = qwen_defaults['selectors']
         with open(CONFIG_PATH, "w") as f:
             yaml.dump(config, f)
             
@@ -245,7 +286,7 @@ def login(service_name: str):
     # Force headful for login
     svc_mgr.headless = False
     driver = svc_mgr._create_driver(target_cfg)
-    driver.start_browser()
+    driver.start_browser(svc_mgr._get_playwright())
     driver.navigate()
     
     Prompt.ask("Press Enter after you have logged in and verified the session...")
