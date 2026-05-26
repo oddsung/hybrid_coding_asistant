@@ -2,7 +2,14 @@ import time
 from .base import BaseDriver
 
 class QwenDriver(BaseDriver):
+    # Qwen renders assistant replies inside .qwen-chat-message-assistant only,
+    # so count those to avoid counting the user's own messages.
+    def _response_count_selector(self) -> str:
+        return ".qwen-chat-message-assistant .qwen-markdown"
+
     def send_message(self, message: str):
+        # Snapshot response count so wait_for_response can detect this turn's reply.
+        self.mark_message_sent()
         selectors = self.config['selectors']
         # Wait for input area
         self.page.wait_for_selector(selectors['input_area'])
@@ -76,13 +83,6 @@ class QwenDriver(BaseDriver):
                 return getCleanText(el).trim();
             }
         """, selector)
-
-    def is_limit_reached(self) -> bool:
-        selectors = self.config['selectors']
-        limit_msg_selector = selectors.get('limit_message')
-        if limit_msg_selector and self.page.query_selector(limit_msg_selector):
-            return True
-        return False
 
     def is_streaming_finished(self) -> bool:
         """Qwen specific: Check if generation is happening."""

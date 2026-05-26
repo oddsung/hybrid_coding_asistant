@@ -1,9 +1,10 @@
 import time
-from typing import Optional
 from .base import BaseDriver
 
 class GrokDriver(BaseDriver):
     def send_message(self, message: str) -> None:
+        # Snapshot response count so wait_for_response can detect this turn's reply.
+        self.mark_message_sent()
         selectors = self.config['selectors']
         input_selector = selectors['input_area']
         submit_selector = selectors['submit_button']
@@ -36,51 +37,10 @@ class GrokDriver(BaseDriver):
         time.sleep(2) # Wait for UI to transition to 'generating' state
 
     def get_last_response(self) -> str:
-        # Grok uses data-testid="messageGroup" or message-content classes
-        # Let's try to be broad but focused on the latest assistant reply
+        # Grok uses data-testid="messageGroup" or message-content classes.
+        # Trust the configured selector to target the latest assistant reply.
         selector = self.config['selectors'].get('response_container', "div[data-testid='messageGroup']")
-        
-        return self.page.evaluate("""
-            (selector) => {
-                const responses = document.querySelectorAll(selector);
-                if (responses.length === 0) return "";
-                // Get the last assistant message (Grok usually alternates user/assistant)
-                // We'll trust the selector to be specific enough or filter here
-                const el = responses[responses.length - 1];
-                
-                function getCleanText(node) {
-                    if (node.nodeType === 3) {
-                        return node.textContent.replace(/\\u00A0/g, ' ');
-                    }
-                    if (node.nodeType !== 1) return "";
-                    
-                    // Grok might have its own code block markers
-                    // For now, use a generic expansion
-                    
-                    if (node.tagName === 'BR') return '\\n';
-                    
-                    let text = "";
-                    for (let child of node.childNodes) {
-                        text += getCleanText(child);
-                    }
-                    
-                    const style = window.getComputedStyle(node);
-                    if (style.display === 'block' || style.display === 'flex' || node.tagName === 'P' || node.tagName === 'DIV') {
-                        if (text && !text.endsWith('\\n')) text += '\\n';
-                    }
-                    return text;
-                }
-                
-                return getCleanText(el).trim();
-            }
-        """, selector)
-
-    def is_limit_reached(self) -> bool:
-        selectors = self.config['selectors']
-        limit_msg_selector = selectors.get('limit_message')
-        if limit_msg_selector and self.page.query_selector(limit_msg_selector):
-            return True
-        return False
+        return self._extract_last_response(selector)
 
     def is_streaming_finished(self) -> bool:
         """Grok specific: Check if generation is happening."""

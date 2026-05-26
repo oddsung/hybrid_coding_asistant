@@ -3,6 +3,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.markdown import Markdown
+from rich.live import Live
 import yaml
 import sys
 import os
@@ -11,6 +12,12 @@ from pathlib import Path
 
 from .context.context import ContextManager
 from .manager.service_manager import ServiceManager
+from .config_schema import build_default_config, ensure_services, validate_config
+from .writer import parse_file_blocks, resolve_safe_path, diff_preview, write_file
+from .executor import classify_command, run_command
+from .logging_setup import setup_logging, get_logger
+
+log = get_logger("main")
 
 app = typer.Typer()
 console = Console()
@@ -28,130 +35,34 @@ def load_config():
     with open(CONFIG_PATH, "r") as f:
         config = yaml.safe_load(f)
 
-    # Auto-inject or update Qwen config
-    services = config.get('services', [])
-    qwen_defaults = {
-        'name': 'qwen',
-        'url': 'https://chat.qwen.ai',
-        'priority': 3,
-        'selectors': {
-            'input_area': '#chat-input',
-            'submit_button': ".send-button",
-            'response_container': ".qwen-markdown",
-            'error_message': None
-        }
-    }
-    
-    # Grok defaults
-    grok_defaults = {
-        'name': 'grok',
-        'url': 'https://grok.com',
-        'priority': 4,
-        'selectors': {
-            'input_area': 'textarea',
-            'submit_button': 'button.group.flex.flex-col.justify-center.rounded-full',
-            'response_container': 'div[data-testid="messageGroup"], div.message-content',
-            'error_message': None
-        }
-    }
+    if not isinstance(config, dict):
+        console.print(f"[red]Config at {CONFIG_PATH} is empty or malformed.[/red]")
+        raise typer.Exit(code=1)
 
-    # DeepSeek defaults
-    deepseek_defaults = {
-        'name': 'deepseek',
-        'url': 'https://chat.deepseek.com',
-        'priority': 5,
-        'selectors': {
-            'input_area': 'textarea',
-            'submit_button': 'div[role="button"]:has(path)', # Icon based
-            'response_container': '.ds-markdown',
-            'error_message': None
-        }
-    }
-
-    modified = False
-    for service_defaults in [qwen_defaults, grok_defaults, deepseek_defaults]:
-        name = service_defaults['name']
-        cfg = next((s for s in services if s['name'] == name), None)
-        if not cfg:
-            console.print(f"[blue]Adding {name.capitalize()} to configuration...[/blue]")
-            services.append(service_defaults)
-            modified = True
-        else:
-            # Proactively update selectors if they differ significantly (e.g. key missing or specific value changed)
-            # For Grok, always update if it's the old data-testid selector
-            if name == 'grok' and 'data-testid' in cfg['selectors'].get('input_area', ''):
-                console.print(f"[blue]Updating {name.capitalize()} configuration for better stability...[/blue]")
-                cfg['selectors'] = service_defaults['selectors']
-                modified = True
-            elif name == 'deepseek' and (not cfg['selectors'].get('submit_button') or 'svg' in cfg['selectors'].get('submit_button')):
-                console.print(f"[blue]Updating {name.capitalize()} configuration for better stability...[/blue]")
-                cfg['selectors'] = service_defaults['selectors']
-                modified = True
-            elif name == 'qwen' and cfg['selectors'].get('response_container') != ".qwen-markdown":
-                console.print(f"[blue]Updating {name.capitalize()} configuration...[/blue]")
-                cfg['selectors'] = service_defaults['selectors']
-                modified = True
-
-    if modified:
-        config['services'] = services
+    # Inject newly-supported drivers; persist only when something changed
+    # (avoids rewriting the config file on every run).
+    if ensure_services(config):
+        console.print("[blue]Added newly-supported services to your configuration.[/blue]")
         with open(CONFIG_PATH, "w") as f:
             yaml.dump(config, f)
-            
+
+    # Fail fast on a broken config, naming exactly what is wrong.
+    errors = validate_config(config)
+    if errors:
+        console.print(f"[red]Invalid configuration in {CONFIG_PATH}:[/red]")
+        for err in errors:
+            console.print(f"  [red]- {err}[/red]")
+        raise typer.Exit(code=1)
+
     return config
 
 def _init_config():
     """Create default config file in app dir."""
     APP_DIR.mkdir(parents=True, exist_ok=True)
-    
-    # Default config content (copied from original source or defined here)
-    default_config = {
-        'browser': {
-            'headless': False,
-            'user_data_dir': str(APP_DIR / "user_data")
-        },
-        'services': [
-            {
-                'name': 'chatgpt',
-                'url': 'https://chatgpt.com',
-                'priority': 1,
-                'selectors': {
-                    'input_area': '#prompt-textarea',
-                    'submit_button': "button[data-testid='send-button']",
-                    'response_container': '.markdown',
-                    'error_message': '.text-red-500'
-                }
-            },
-            {
-                'name': 'gemini',
-                'url': 'https://gemini.google.com',
-                'priority': 2,
-                'selectors': {
-                    'input_area': "div[contenteditable='true']",
-                    'submit_button': "button[aria-label='Send message']",
-                    'response_container': "model-response",
-                    'limit_message': "You have reached your limit"
-                }
-            },
-            {
-                'name': 'qwen',
-                'url': 'https://chat.qwen.ai',
-                'priority': 3,
-                'selectors': {
-                    'input_area': '#chat-input',
-                    'submit_button': ".send-button",
-                    'response_container': ".assistant-message-content",
-                    'error_message': None
-                }
-            } 
-            # Deepseek omitted for brevity, can be added
-        ],
-        'context': {
-            'max_files': 10,
-            'max_chars': 10000,
-            'ignore_patterns': ['*.pyc', '__pycache__', '.git', 'node_modules', 'venv', '.idea', '.vscode']
-        }
-    }
-    
+
+    default_config = build_default_config()
+    default_config['browser']['user_data_dir'] = str(APP_DIR / "user_data")
+
     with open(CONFIG_PATH, "w") as f:
         yaml.dump(default_config, f)
     console.print(f"[green]Created default config at {CONFIG_PATH}[/green]")
@@ -167,11 +78,17 @@ def init():
 @app.command()
 def chat(
     target_dir: str = typer.Option(".", "--dir", "-d", help="Target project directory to analyze"),
-    service: str = typer.Option(None, "--service", "-s", help="Preferred LLM service (chatgpt, gemini, qwen)")
+    service: str = typer.Option(None, "--service", "-s", help="Preferred LLM service (chatgpt, gemini, qwen)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview file writes and commands without applying them"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show debug-level logs in the console")
 ):
     """
     Start the Free LLM Coder assistant (Interactive Mode).
+
+    Interactive commands: type 'exit'/'quit' to leave, '/new' to start a fresh chat.
     """
+    setup_logging(APP_DIR / "logs", verbose=verbose)
+    log.info("starting chat target=%s service=%s dry_run=%s", target_dir, service, dry_run)
     config = load_config()
     console.print(Panel.fit("Welcome to Free LLM Coder!", style="bold green"))
     console.print(f"[dim]Target Directory: {Path(target_dir).resolve()}[/dim]")
@@ -180,7 +97,7 @@ def chat(
 
     # Initialize Managers
     try:
-        ctx_mgr = ContextManager(root_path=target_dir)
+        ctx_mgr = ContextManager(root_path=target_dir, config=config)
         svc_mgr = ServiceManager(config, preferred_service=service)
     except Exception as e:
         console.print(f"[red]Initialization Error: {e}[/red]")
@@ -191,73 +108,99 @@ def chat(
 
     while True:
         user_input = Prompt.ask("\n[bold cyan]You[/bold cyan]")
-        
-        if user_input.lower() in ['exit', 'quit']:
+        command = user_input.strip().lower()
+
+        if command in ['exit', 'quit']:
             svc_mgr.close_all()
             break
 
         if not user_input.strip():
             continue
 
+        if command in ['/new', '/reset']:
+            ctx_mgr.reset()
+            svc_mgr.new_chat_all()
+            console.print("[green]Started a fresh chat. Full project context will be sent on the next message.[/green]")
+            continue
+
         # Build Prompt with Context
         console.print("[dim]Analyzing project context...[/dim]")
         full_prompt = ctx_mgr.build_prompt(user_input)
-        
-        # Retry loop for rotation
-        while True:
+
+        # Pick the highest-priority service whose circuit breaker allows it.
+        svc_mgr.reset_rotation()
+        if svc_mgr.is_exhausted():
+            console.print("[bold red]All services are on cooldown. Try again shortly.[/bold red]")
+            continue
+
+        # Retry loop for service rotation, with bounded attempts so a
+        # persistently failing/empty service can never loop forever.
+        service_name = "unknown"
+        empty_retries = 0
+        attempts = 0
+        max_total_attempts = max(2, len(svc_mgr.services_config) * 2)
+
+        while attempts < max_total_attempts:
+            attempts += 1
             try:
-                driver = svc_mgr.get_active_driver()
-                service_name = svc_mgr.services_config[svc_mgr.active_service_index]['name']
+                driver, service_name = svc_mgr.get_active()
                 console.print(f"[dim]Sending to {service_name}...[/dim]")
-                
+
                 driver.send_message(full_prompt)
-                
-                with console.status(f"Waiting for {service_name}...", spinner="dots"):
-                    response = driver.wait_for_response()
-                
-                # Check for limits or errors in response content (naive check)
+
+                # Live-update a trimmed tail of the response as it streams in.
+                with Live(console=console, refresh_per_second=4, transient=True) as live:
+                    live.update(f"[dim]Waiting for {service_name}...[/dim]")
+
+                    def _on_update(partial: str):
+                        snippet = partial[-1500:]
+                        live.update(Panel(snippet, title=f"{service_name} (streaming...)", border_style="dim"))
+
+                    response = driver.wait_for_response(on_update=_on_update)
+
+                # Rotate when the service reports a usage limit.
                 if driver.is_limit_reached():
                     console.print(f"[red]Limit reached on {service_name}. Rotating...[/red]")
                     svc_mgr.rotate_service()
-                    continue # Retry with next service
-
-                if not response:
-                    console.print(f"[red]Empty response from {service_name}. Retrying...[/red]")
-                    # Potential for infinite loop if all fail in specific ways; add counter if needed
-                    time.sleep(2)
+                    empty_retries = 0
+                    if svc_mgr.is_exhausted():
+                        console.print("[bold red]All services unavailable for this prompt.[/bold red]")
+                        break
                     continue
 
-                console.print(Panel(Markdown(response), title=f"Response from {service_name}", border_style="green"))
-                
-                # Auto-Execute Check
-                commands = _extract_bash_blocks(response)
-                if commands:
-                    console.print("\n[bold yellow]Found Shell Commands:[/bold yellow]")
-                    for i, cmd in enumerate(commands, 1):
-                        console.print(Panel(cmd, title=f"Command {i}", border_style="yellow"))
-                        
-                    if typer.confirm("Do you want to execute these commands?"):
-                        import subprocess
-                        for cmd in commands:
-                            console.print(f"[dim]Running:[/dim] {cmd.splitlines()[0]} ...")
-                            try:
-                                subprocess.run(cmd, shell=True, cwd=target_dir, check=True)
-                            except subprocess.CalledProcessError as e:
-                                console.print(f"[red]Command failed:[/red] {e}")
-                        console.print("[bold green]Execution Complete![/bold green]")
+                # Bounded retry on empty responses; rotate after repeated misses.
+                if not response:
+                    empty_retries += 1
+                    console.print(f"[red]Empty response from {service_name} (attempt {empty_retries}).[/red]")
+                    if empty_retries >= 2:
+                        console.print("[yellow]Repeated empty responses. Rotating service...[/yellow]")
+                        svc_mgr.rotate_service()
+                        empty_retries = 0
+                        if svc_mgr.is_exhausted():
+                            console.print("[bold red]All services unavailable for this prompt.[/bold red]")
+                            break
                     else:
-                        console.print("[dim]Skipped execution.[/dim]")
+                        time.sleep(2)
+                    continue
+
+                svc_mgr.mark_success()
+                console.print(Panel(Markdown(response), title=f"Response from {service_name}", border_style="green"))
+
+                # Apply structured file blocks, then offer to run shell commands.
+                _apply_file_blocks(response, target_dir, dry_run)
+                _run_shell_commands(response, target_dir, dry_run)
 
                 break # Success, exit retry loop
 
             except Exception as e:
                 console.print(f"[red]Error with {service_name}: {e}[/red]")
                 svc_mgr.rotate_service()
-                if svc_mgr.active_service_index >= len(svc_mgr.services_config):
-                    console.print("[bold red]All services failed. Exiting.[/bold red]")
-                    svc_mgr.close_all()
-                    raise typer.Exit(code=1)
+                if svc_mgr.is_exhausted():
+                    console.print("[bold red]All services unavailable for this prompt.[/bold red]")
+                    break
                 continue
+        else:
+            console.print("[bold red]Max attempts reached for this prompt. Try again or check your sessions.[/bold red]")
 
 def _extract_bash_blocks(text: str) -> list[str]:
     """Extract content from ```bash or ```shell blocks."""
@@ -266,6 +209,109 @@ def _extract_bash_blocks(text: str) -> list[str]:
     # Supports ```bash, ```shell, or just ```sh with flexible whitespace/newline
     matches = re.findall(r'```(?:\s*bash|\s*shell|\s*sh)\s*\n(.*?)```', text, re.DOTALL | re.IGNORECASE)
     return [m.strip() for m in matches]
+
+
+def _apply_file_blocks(response: str, target_dir: str, dry_run: bool):
+    """Preview and write any ```file:<path>``` blocks from the response.
+
+    Each file is shown (a diff for an existing file, the content for a new
+    one) and confirmed individually. Paths that escape the project directory
+    are refused.
+    """
+    blocks = parse_file_blocks(response)
+    if not blocks:
+        return
+
+    console.print(f"\n[bold cyan]Found {len(blocks)} file block(s).[/bold cyan]")
+    apply_all = False
+    for block in blocks:
+        try:
+            target = resolve_safe_path(target_dir, block.path)
+        except ValueError as e:
+            console.print(f"[red]Skipping unsafe path:[/red] {e}")
+            continue
+
+        exists = target.exists()
+        action = "overwrite" if exists else "create"
+        if exists:
+            diff = diff_preview(target, block.content)
+            if not diff.strip():
+                console.print(f"[dim]{block.path}: identical to current file; skipping.[/dim]")
+                continue
+            console.print(Panel(diff, title=f"{action}: {block.path}", border_style="cyan"))
+        else:
+            preview = block.content
+            if len(preview) > 2000:
+                preview = preview[:2000] + "\n... (truncated)"
+            console.print(Panel(preview, title=f"{action}: {block.path}", border_style="cyan"))
+
+        if dry_run:
+            console.print(f"[dim](dry-run) would {action} {block.path}[/dim]")
+            continue
+
+        if not apply_all:
+            choice = Prompt.ask(
+                "Apply this file? ([y]es / [n]o / [a]ll / [q]uit)",
+                choices=["y", "n", "a", "q"], default="y",
+            )
+            if choice == "q":
+                console.print("[dim]Stopped applying files.[/dim]")
+                return
+            if choice == "n":
+                console.print(f"[dim]Skipped {block.path}.[/dim]")
+                continue
+            if choice == "a":
+                apply_all = True
+
+        try:
+            write_file(target, block.content)
+            console.print(f"[green]Wrote {block.path}[/green]")
+        except Exception as e:
+            console.print(f"[red]Failed to write {block.path}: {e}[/red]")
+
+
+def _run_shell_commands(response: str, target_dir: str, dry_run: bool):
+    """Preview, risk-screen, and optionally run ```bash``` blocks one by one."""
+    commands = _extract_bash_blocks(response)
+    if not commands:
+        return
+
+    console.print(f"\n[bold yellow]Found {len(commands)} shell command block(s).[/bold yellow]")
+    run_all = False
+    for i, cmd in enumerate(commands, 1):
+        blocked, block_reasons, warnings = classify_command(cmd)
+        console.print(Panel(cmd, title=f"Command {i}", border_style="yellow"))
+
+        if blocked:
+            console.print(f"[bold red]Blocked -- {'; '.join(block_reasons)}. Not executed.[/bold red]")
+            continue
+        for w in warnings:
+            console.print(f"[yellow]Warning: {w}.[/yellow]")
+
+        if dry_run:
+            console.print("[dim](dry-run) command not executed.[/dim]")
+            continue
+
+        if not run_all:
+            choice = Prompt.ask(
+                "Run this command? ([y]es / [n]o / [a]ll / [q]uit)",
+                choices=["y", "n", "a", "q"], default="n",
+            )
+            if choice == "q":
+                console.print("[dim]Stopped running commands.[/dim]")
+                return
+            if choice == "n":
+                console.print(f"[dim]Skipped command {i}.[/dim]")
+                continue
+            if choice == "a":
+                run_all = True
+
+        console.print(f"[dim]Running:[/dim] {cmd.splitlines()[0]} ...")
+        code = run_command(cmd, target_dir)
+        if code == 0:
+            console.print("[green]Command succeeded.[/green]")
+        else:
+            console.print(f"[red]Command exited with code {code}.[/red]")
 
 @app.command()
 def login(service_name: str):

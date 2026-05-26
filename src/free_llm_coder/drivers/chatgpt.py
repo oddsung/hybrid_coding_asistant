@@ -3,6 +3,8 @@ import time
 
 class ChatGPTDriver(BaseDriver):
     def send_message(self, message: str):
+        # Snapshot response count so wait_for_response can detect this turn's reply.
+        self.mark_message_sent()
         selectors = self.config['selectors']
         # Wait for input area
         self.page.wait_for_selector(selectors['input_area'])
@@ -40,7 +42,7 @@ class ChatGPTDriver(BaseDriver):
                         // Attempt to clean up the header text which acts as pollution
                         // We essentially just value the 'code' element's text.
                         
-                        const newContent = document.createTextNode(`\n\`\`\`bash\n${code.innerText}\n\`\`\`\n`);
+                        const newContent = document.createTextNode(`\n\\`\\`\\`bash\n${code.innerText}\n\\`\\`\\`\n`);
                         pre.replaceWith(newContent);
                     }
                 });
@@ -48,14 +50,6 @@ class ChatGPTDriver(BaseDriver):
                 return clone.innerText;
             }
         """, selectors['response_container'])
-
-    def is_limit_reached(self) -> bool:
-        selectors = self.config['selectors']
-        error_selector = selectors.get('error_message')
-        if error_selector and self.page.query_selector(error_selector):
-            return True
-        # Check text content for "limit" keywords if needed
-        return False
 
     def is_streaming_finished(self) -> bool:
         """ChatGPT specific: Wait until the send button appears/is enabled logic."""

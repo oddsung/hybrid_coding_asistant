@@ -3,108 +3,60 @@ from .base import BaseDriver
 
 class DeepSeekDriver(BaseDriver):
     def send_message(self, message: str) -> None:
+        # Snapshot response count so wait_for_response can detect this turn's reply.
+        self.mark_message_sent()
+
         selectors = self.config['selectors']
         input_selector = selectors['input_area']
-        submit_selector = selectors['submit_button']
-        
+
         # Ensure focus and type to trigger input events
         try:
             self.page.wait_for_selector(input_selector, timeout=15000)
             self.page.focus(input_selector)
-        except:
+        except Exception:
             input_selector = "textarea"
             self.page.wait_for_selector(input_selector, timeout=5000)
             self.page.focus(input_selector)
-            
-        # Clear if any (though usually empty)
-        # self.page.fill(input_selector, "")
-        
-        # Simplified approach: Use execCommand to "paste" (enables button) 
-        # and then press Enter to send.
+
         try:
-            # 1. Focus and insert text using execCommand (most reliable for state update)
-            self.page.evaluate(f'''(msg) => {{
+            # 1. Insert text via execCommand (most reliable for state update,
+            #    this is what enables the send button).
+            self.page.evaluate('''(msg) => {
                 const textarea = document.querySelector('textarea');
-                if (textarea) {{
+                if (textarea) {
                     textarea.focus();
                     textarea.select();
                     textarea.value = '';
                     document.execCommand('insertText', false, msg);
-                    
-                    // Dispatch events just in case
-                    textarea.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                }}
-            }}''', message)
-            
-            time.sleep(0.5) # Brief pause for UI to register
-            
-            # 2. Press Enter to trigger the send functionality
-            self.page.keyboard.press("Enter")
-            
-            # 3. Fallback: Try clicking the button via JS if Enter didn't work 
-            # (though Enter is usually the most reliable once text is inserted)
-            self.page.evaluate(f'''() => {{
+                    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+            }''', message)
+            time.sleep(0.5)  # Brief pause for UI to register
+
+            # 2. Primary: click the send button. We deliberately do NOT also
+            #    press Enter here -- doing both can submit the message twice.
+            self.page.evaluate('''() => {
                 const sendBtn = Array.from(document.querySelectorAll('div[role="button"]'))
                                      .find(b => (b.innerHTML.includes('svg') || b.innerHTML.includes('path')) && !b.innerText.includes('?'));
-                if (sendBtn && !sendBtn.classList.contains('ds-icon-button--disabled')) {{
+                if (sendBtn && !sendBtn.classList.contains('ds-icon-button--disabled')) {
                     sendBtn.click();
-                }}
-            }}''')
+                }
+            }''')
+
+            # 3. Fallback: only if the click did not actually send, press Enter once.
+            if not self._wait_message_sent(timeout=3):
+                self.page.keyboard.press("Enter")
         except Exception as e:
             print(f"[Warning] DeepSeek send failure: {e}")
             self.page.fill(input_selector, message)
             self.page.keyboard.press("Enter")
 
-        time.sleep(2) # Wait for UI to transition
+        time.sleep(1)  # Wait for UI to transition
 
     def get_last_response(self) -> str:
-        # DeepSeek uses .ds-markdown for responses
-        selector = ".ds-markdown"
-        
-        return self.page.evaluate("""
-            (selector) => {
-                const responses = document.querySelectorAll(selector);
-                if (responses.length === 0) return "";
-                const el = responses[responses.length - 1];
-                
-                function getCleanText(node) {
-                    if (node.nodeType === 3) {
-                        return node.textContent.replace(/\\u00A0/g, ' ');
-                    }
-                    if (node.nodeType !== 1) return "";
-                    
-                    // Skip buttons (Copy/Download UI) and any element with 'ds-icon-button' class
-                    if (node.tagName === 'BUTTON' || 
-                        (node.classList && node.classList.contains('ds-icon-button'))) {
-                        return "";
-                    }
-                    
-                    if (node.tagName === 'BR') return '\\n';
-                    
-                    let text = "";
-                    for (let child of node.childNodes) {
-                        text += getCleanText(child);
-                    }
-                    
-                    const style = window.getComputedStyle(node);
-                    // Ensure block elements (div, p, pre, code blocks) get newlines
-                    if (style.display === 'block' || style.display === 'flex' || 
-                        node.tagName === 'P' || node.tagName === 'DIV' || node.tagName === 'PRE') {
-                        if (text && !text.endsWith('\\n')) text += '\\n';
-                    }
-                    return text;
-                }
-                
-                return getCleanText(el).trim();
-            }
-        """, selector)
-
-    def is_limit_reached(self) -> bool:
-        selectors = self.config['selectors']
-        limit_msg_selector = selectors.get('limit_message')
-        if limit_msg_selector and self.page.query_selector(limit_msg_selector):
-            return True
-        return False
+        # DeepSeek uses .ds-markdown for responses; the shared walker already
+        # skips its Copy/Download icon buttons.
+        return self._extract_last_response(".ds-markdown")
 
     def is_streaming_finished(self) -> bool:
         """DeepSeek specific: Check if generation is happening."""

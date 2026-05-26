@@ -3,6 +3,8 @@ import time
 
 class GeminiDriver(BaseDriver):
     def send_message(self, message: str):
+        # Snapshot response count so wait_for_response can detect this turn's reply.
+        self.mark_message_sent()
         selectors = self.config['selectors']
         # Wait for input area
         self.page.wait_for_selector(selectors['input_area'])
@@ -22,11 +24,6 @@ class GeminiDriver(BaseDriver):
         if responses:
             return responses[-1].inner_text()
         return ""
-
-    def is_limit_reached(self) -> bool:
-        # Check for textual indicators
-        content = self.page.content()
-        return "reached your limit" in content or "capacity" in content
 
     def is_streaming_finished(self) -> bool:
         selectors = self.config['selectors']
