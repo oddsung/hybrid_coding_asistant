@@ -50,8 +50,10 @@ class GrokDriver(BaseDriver):
         
         # If the button is disabled or has a stop icon, it's still streaming
         if submit_btn:
-            # Check for common stop icon patterns or disabled state
-            is_disabled = submit_btn.get_attribute('disabled') is not None or "disabled" in submit_btn.get_attribute('class', '')
+            # Check for common stop icon patterns or disabled state.
+            # get_attribute returns None when the attribute is absent.
+            btn_class = submit_btn.get_attribute('class') or ''
+            is_disabled = submit_btn.get_attribute('disabled') is not None or "disabled" in btn_class
             if is_disabled:
                 return False
             

@@ -11,10 +11,11 @@ import time
 from pathlib import Path
 
 from .context.context import ContextManager
+from .conversation import Conversation
 from .manager.service_manager import ServiceManager
 from .config_schema import build_default_config, ensure_services, validate_config
 from .writer import parse_file_blocks, resolve_safe_path, diff_preview, write_file
-from .executor import classify_command, run_command
+from .executor import classify_command, run_command, TIMEOUT_EXIT_CODE
 from .logging_setup import setup_logging, get_logger
 
 log = get_logger("main")
@@ -77,8 +78,11 @@ def init():
 
 @app.command()
 def chat(
-    target_dir: str = typer.Option(".", "--dir", "-d", help="Target project directory to analyze"),
+    target_dir: str = typer.Option(".", "--dir", "-d", help="Target project directory to analyze (code mode)"),
     service: str = typer.Option(None, "--service", "-s", help="Preferred LLM service (chatgpt, gemini, qwen)"),
+    mode: str = typer.Option("code", "--mode", "-m",
+                             help="'code': coding assistant with project context and file/command blocks; "
+                                  "'chat': general-purpose Q&A, questions sent verbatim"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview file writes and commands without applying them"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show debug-level logs in the console")
 ):
@@ -87,21 +91,31 @@ def chat(
 
     Interactive commands: type 'exit'/'quit' to leave, '/new' to start a fresh chat.
     """
+    if mode not in ("code", "chat"):
+        console.print(f"[red]Unknown mode '{mode}'. Use 'code' or 'chat'.[/red]")
+        raise typer.Exit(code=1)
+
     setup_logging(APP_DIR / "logs", verbose=verbose)
-    log.info("starting chat target=%s service=%s dry_run=%s", target_dir, service, dry_run)
+    log.info("starting chat target=%s service=%s mode=%s dry_run=%s", target_dir, service, mode, dry_run)
     config = load_config()
     console.print(Panel.fit("Welcome to Free LLM Coder!", style="bold green"))
-    console.print(f"[dim]Target Directory: {Path(target_dir).resolve()}[/dim]")
+    console.print(f"[dim]Mode: {mode}[/dim]")
+    if mode == "code":
+        console.print(f"[dim]Target Directory: {Path(target_dir).resolve()}[/dim]")
     if service:
         console.print(f"[dim]Preferred Service: {service}[/dim]")
 
     # Initialize Managers
     try:
-        ctx_mgr = ContextManager(root_path=target_dir, config=config)
+        ctx_mgr = ContextManager(root_path=target_dir, config=config, mode=mode)
         svc_mgr = ServiceManager(config, preferred_service=service)
     except Exception as e:
         console.print(f"[red]Initialization Error: {e}[/red]")
         raise typer.Exit(code=1)
+
+    # Program-side transcript: lets a different service take over mid-
+    # conversation (usage limit hit) without losing the dialogue so far.
+    conversation = Conversation()
 
     console.print(f"[blue]Loaded {len(svc_mgr.services_config)} services.[/blue]")
     console.print("[yellow]Tip: Login to services via browser first if needed.[/yellow]")
@@ -119,13 +133,13 @@ def chat(
 
         if command in ['/new', '/reset']:
             ctx_mgr.reset()
+            conversation.reset()
             svc_mgr.new_chat_all()
-            console.print("[green]Started a fresh chat. Full project context will be sent on the next message.[/green]")
+            console.print("[green]Started a fresh chat.[/green]")
             continue
 
-        # Build Prompt with Context
-        console.print("[dim]Analyzing project context...[/dim]")
-        full_prompt = ctx_mgr.build_prompt(user_input)
+        if mode == "code":
+            console.print("[dim]Analyzing project context...[/dim]")
 
         # Pick the highest-priority service whose circuit breaker allows it.
         svc_mgr.reset_rotation()
@@ -145,6 +159,15 @@ def chat(
             try:
                 driver, service_name = svc_mgr.get_active()
                 console.print(f"[dim]Sending to {service_name}...[/dim]")
+
+                # Build the prompt for THIS service: it gets a handoff block
+                # for any conversation turns it has not seen (e.g. it is
+                # taking over after another service hit its limit), plus --
+                # in code mode -- the project context it is missing.
+                handoff = conversation.handoff_block(service_name)
+                if handoff:
+                    console.print(f"[dim]Handing the conversation over to {service_name}...[/dim]")
+                full_prompt = handoff + ctx_mgr.build_prompt(user_input, service_name)
 
                 driver.send_message(full_prompt)
 
@@ -184,11 +207,20 @@ def chat(
                     continue
 
                 svc_mgr.mark_success()
+                # Confirm delivery: context files count as sent, and this
+                # service is now up to date on the whole conversation.
+                ctx_mgr.commit(service_name)
+                conversation.record("user", user_input)
+                conversation.record("assistant", response)
+                conversation.mark_seen(service_name)
+
                 console.print(Panel(Markdown(response), title=f"Response from {service_name}", border_style="green"))
 
-                # Apply structured file blocks, then offer to run shell commands.
-                _apply_file_blocks(response, target_dir, dry_run)
-                _run_shell_commands(response, target_dir, dry_run)
+                # Code mode: apply structured file blocks, then offer to run
+                # shell commands. Chat mode is pure Q&A.
+                if mode == "code":
+                    _apply_file_blocks(response, target_dir, dry_run)
+                    _run_shell_commands(response, target_dir, dry_run)
 
                 break # Success, exit retry loop
 
@@ -310,8 +342,111 @@ def _run_shell_commands(response: str, target_dir: str, dry_run: bool):
         code = run_command(cmd, target_dir)
         if code == 0:
             console.print("[green]Command succeeded.[/green]")
+        elif code == TIMEOUT_EXIT_CODE:
+            console.print("[red]Command timed out and was killed.[/red]")
         else:
             console.print(f"[red]Command exited with code {code}.[/red]")
+
+@app.command()
+def doctor(
+    service: str = typer.Option(None, "--service", "-s", help="Check only this service"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show debug-level logs in the console"),
+):
+    """Check each configured service's selectors against the live page.
+
+    Opens every service (or just one with -s), loads its URL, and reports
+    which configured selectors still match an element. This is the first
+    thing to run when a site stops responding: it tells you exactly which
+    selector in config.yaml needs updating.
+    """
+    from rich.table import Table
+
+    setup_logging(APP_DIR / "logs", verbose=verbose)
+    config = load_config()
+    svc_mgr = ServiceManager(config)
+
+    targets = [s for s in svc_mgr.services_config if not service or s['name'] == service]
+    if not targets:
+        console.print(f"[red]Service '{service}' not found in config.[/red]")
+        raise typer.Exit(code=1)
+
+    # response_container / generating_indicator legitimately match nothing on
+    # a fresh page, so a miss there is informational rather than a failure.
+    checked_keys = ("input_area", "submit_button", "response_container",
+                    "new_chat_button", "generating_indicator")
+    absent_ok = {"response_container", "generating_indicator", "new_chat_button"}
+
+    table = Table(title="Selector health")
+    table.add_column("service")
+    table.add_column("selector")
+    table.add_column("css")
+    table.add_column("status")
+
+    for cfg in targets:
+        name = cfg['name']
+        console.print(f"[dim]Checking {name} ({cfg['url']})...[/dim]")
+        driver = None
+        try:
+            driver = svc_mgr._create_driver(cfg)
+            driver.start_browser(svc_mgr._get_playwright())
+            driver.navigate()
+            time.sleep(3)  # let client-side rendering settle
+
+            selectors = cfg.get('selectors', {}) or {}
+            for key in checked_keys:
+                sel = selectors.get(key)
+                if not sel:
+                    continue
+                try:
+                    found = driver.page.query_selector(sel) is not None
+                except Exception:
+                    found = False
+                if found:
+                    status = "[green]OK[/green]"
+                elif key in absent_ok:
+                    status = "[yellow]not found (may be normal on an empty chat)[/yellow]"
+                else:
+                    status = "[red]NOT FOUND -- update config.yaml[/red]"
+                table.add_row(name, key, sel, status)
+        except Exception as e:
+            table.add_row(name, "-", "-", f"[red]failed to open: {e}[/red]")
+        finally:
+            if driver:
+                try:
+                    driver.close()
+                except Exception:
+                    pass
+
+    svc_mgr.close_all()
+    console.print(table)
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind address for the API server"),
+    port: int = typer.Option(8000, "--port", "-p", help="Port for the API server"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show debug-level logs in the console"),
+):
+    """Run an OpenAI-compatible API server backed by the web LLM services.
+
+    Point Open WebUI / LM Studio / any OpenAI SDK at http://HOST:PORT/v1
+    (any API key is accepted). Each configured service appears as a model;
+    the "auto" model uses priority order with limit-based rotation.
+    """
+    setup_logging(APP_DIR / "logs", verbose=verbose)
+    config = load_config()
+
+    import uvicorn
+    from .server import create_app
+
+    console.print(Panel.fit(
+        f"OpenAI-compatible API on http://{host}:{port}/v1\n"
+        "Models: auto, " + ", ".join(s['name'] for s in config['services']),
+        title="free-llm-coder serve", style="bold green",
+    ))
+    console.print("[yellow]Note: requests are processed one at a time (a real browser session per service).[/yellow]")
+    uvicorn.run(create_app(config), host=host, port=port, log_level="warning")
+
 
 @app.command()
 def login(service_name: str):

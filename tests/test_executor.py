@@ -1,7 +1,7 @@
-"""Tests for command risk classification."""
+"""Tests for command risk classification and execution."""
 import pytest
 
-from free_llm_coder.executor import classify_command
+from free_llm_coder.executor import classify_command, run_command, TIMEOUT_EXIT_CODE
 
 
 @pytest.mark.parametrize("cmd", [
@@ -41,3 +41,12 @@ def test_warn_patterns(cmd):
 def test_safe_commands_pass_clean(cmd):
     blocked, _, warnings = classify_command(cmd)
     assert not blocked and not warnings, cmd
+
+
+def test_run_command_returns_exit_code(tmp_path):
+    assert run_command("true", str(tmp_path)) == 0
+    assert run_command("exit 3", str(tmp_path)) == 3
+
+
+def test_run_command_times_out(tmp_path):
+    assert run_command("sleep 5", str(tmp_path), timeout=0.3) == TIMEOUT_EXIT_CODE

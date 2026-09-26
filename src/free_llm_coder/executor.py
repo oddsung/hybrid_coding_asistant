@@ -39,7 +39,24 @@ def classify_command(cmd: str) -> Tuple[bool, List[str], List[str]]:
     return (bool(blocked_reasons), blocked_reasons, warnings)
 
 
-def run_command(cmd: str, cwd: str) -> int:
-    """Run ``cmd`` in ``cwd`` via the shell. Returns the process exit code."""
-    result = subprocess.run(cmd, shell=True, cwd=cwd)
+# Exit code reported when a command is killed for exceeding the timeout
+# (mirrors the shell convention used by GNU timeout).
+TIMEOUT_EXIT_CODE = 124
+
+# Default wall-clock limit for LLM-proposed commands. Long enough for installs
+# and test runs, short enough that a hung command cannot freeze the CLI forever.
+DEFAULT_COMMAND_TIMEOUT = 300
+
+
+def run_command(cmd: str, cwd: str, timeout: float = DEFAULT_COMMAND_TIMEOUT) -> int:
+    """Run ``cmd`` in ``cwd`` via the shell. Returns the process exit code.
+
+    The command is killed after ``timeout`` seconds so a hung command can
+    never freeze the interactive loop; in that case ``TIMEOUT_EXIT_CODE`` is
+    returned.
+    """
+    try:
+        result = subprocess.run(cmd, shell=True, cwd=cwd, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return TIMEOUT_EXIT_CODE
     return result.returncode

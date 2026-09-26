@@ -6,7 +6,7 @@ spawns playwright, which these tests never invoke.
 import time
 
 from free_llm_coder.config_schema import build_default_config
-from free_llm_coder.drivers import DRIVER_REGISTRY
+from free_llm_coder.drivers import resolve_driver_class
 from free_llm_coder.manager.service_manager import (
     ServiceManager,
     FAILURE_THRESHOLD,
@@ -20,17 +20,37 @@ def _cfg():
     return cfg
 
 
-def test_registry_covers_default_services():
-    assert set(DRIVER_REGISTRY) == set(s["name"] for s in build_default_config()["services"])
+def test_every_default_service_resolves_to_a_driver():
+    for svc in build_default_config()["services"]:
+        assert resolve_driver_class(svc) is not None, svc["name"]
 
 
 def test_priority_sort_and_preferred_moves_to_front():
     cfg = _cfg()
     sm = ServiceManager(cfg)
-    assert [s["name"] for s in sm.services_config] == ["chatgpt", "gemini", "qwen", "grok", "deepseek"]
+    assert [s["name"] for s in sm.services_config] == [
+        "chatgpt", "gemini", "qwen", "grok", "deepseek", "glm", "kimi",
+    ]
 
     sm2 = ServiceManager(cfg, preferred_service="grok")
     assert sm2.services_config[0]["name"] == "grok"
+
+
+def test_select_service_honors_breaker_and_unknown_names():
+    sm = ServiceManager(_cfg())
+    sm.reset_rotation()
+
+    assert sm.select_service("grok") is True
+    assert sm.services_config[sm.active_service_index]["name"] == "grok"
+
+    # An open breaker refuses selection and leaves the index untouched.
+    for _ in range(FAILURE_THRESHOLD):
+        sm.record_failure("gemini")
+    before = sm.active_service_index
+    assert sm.select_service("gemini") is False
+    assert sm.active_service_index == before
+
+    assert sm.select_service("no-such-service") is False
 
 
 def test_reset_rotation_picks_first_available_skipping_open():

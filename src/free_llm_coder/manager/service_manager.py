@@ -1,7 +1,7 @@
 import time
 from typing import Optional, Dict
 from ..drivers.base import BaseDriver
-from ..drivers import DRIVER_REGISTRY
+from ..drivers import resolve_driver_class
 from ..logging_setup import get_logger
 from playwright.sync_api import sync_playwright, Playwright
 
@@ -94,6 +94,21 @@ class ServiceManager:
         idx = self._first_available_index(0)
         self.active_service_index = idx if idx is not None else len(self.services_config)
 
+    def select_service(self, name: str) -> bool:
+        """Point the rotation at ``name`` if it exists and its breaker allows
+        it. Returns False (leaving the current selection intact) otherwise.
+
+        Used by per-request service selection (e.g. the API server's ``model``
+        field), where the preference changes request to request.
+        """
+        for i, svc in enumerate(self.services_config):
+            if svc['name'] == name:
+                if self._is_available(name):
+                    self.active_service_index = i
+                    return True
+                return False
+        return False
+
     # ------------------------------------------------------------------ #
     # Driver lifecycle
     # ------------------------------------------------------------------ #
@@ -105,13 +120,7 @@ class ServiceManager:
     def _create_driver(self, service_cfg: dict) -> BaseDriver:
         name = service_cfg['name']
         user_data_dir = f"{self.user_data_base}/{name}"
-
-        driver_cls = DRIVER_REGISTRY.get(name)
-        if driver_cls is None:
-            raise ValueError(
-                f"Unknown service driver: '{name}'. "
-                f"Known drivers: {', '.join(sorted(DRIVER_REGISTRY))}"
-            )
+        driver_cls = resolve_driver_class(service_cfg)
         return driver_cls(service_cfg, user_data_dir, self.headless)
 
     def get_active_driver(self) -> BaseDriver:

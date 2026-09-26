@@ -30,13 +30,19 @@ COMMON_LIMIT_KEYWORDS = [
 DEFAULT_BROWSER = {"headless": False}
 
 DEFAULT_CONTEXT = {
-    "max_files": 10,
-    "max_chars": 10000,
+    "max_files": 25,
+    "max_chars": 60000,
     "ignore_patterns": ["*.pyc", "__pycache__", ".git", "node_modules", "venv", ".idea", ".vscode"],
 }
 
 # Known drivers and their default config. ``limit_indicators`` carries optional
 # CSS selectors and extra text keywords used by BaseDriver.is_limit_reached.
+#
+# A service may set ``driver`` to pick its driver class explicitly; without it
+# the service ``name`` is looked up in DRIVER_REGISTRY and unknown names fall
+# back to the config-only GenericDriver. This is how a user can add ANY chat
+# site from config alone: give it a name, URL, selectors and (optionally)
+# ``selectors.generating_indicator`` -- no code required.
 DEFAULT_SERVICES = {
     "chatgpt": {
         "name": "chatgpt",
@@ -113,6 +119,44 @@ DEFAULT_SERVICES = {
             "keywords": ["server is busy", "服务器繁忙"],
         },
     },
+    # GLM (Zhipu AI) international chat. Uses the config-only GenericDriver;
+    # verify/adjust selectors with `flc doctor -s glm` after logging in.
+    "glm": {
+        "name": "glm",
+        "url": "https://chat.z.ai",
+        "priority": 6,
+        "driver": "generic",
+        "selectors": {
+            "input_area": "#chat-input",
+            "submit_button": "#send-message-button",
+            "response_container": ".chat-assistant",
+            "generating_indicator": "#stop-response-button",
+            "error_message": None,
+        },
+        "limit_indicators": {
+            "selectors": [],
+            "keywords": ["daily limit", "usage cap"],
+        },
+    },
+    # Kimi (Moonshot AI). Uses the config-only GenericDriver; verify/adjust
+    # selectors with `flc doctor -s kimi` after logging in.
+    "kimi": {
+        "name": "kimi",
+        "url": "https://www.kimi.com",
+        "priority": 7,
+        "driver": "generic",
+        "selectors": {
+            "input_area": ".chat-input-editor",
+            "submit_button": ".send-button",
+            "response_container": ".segment-assistant .markdown",
+            "generating_indicator": ".stop-button",
+            "error_message": None,
+        },
+        "limit_indicators": {
+            "selectors": [],
+            "keywords": ["达到上限", "次数已用完"],
+        },
+    },
 }
 
 
@@ -166,6 +210,10 @@ def validate_config(config: dict) -> List[str]:
         for key in ("name", "url", "priority", "selectors"):
             if key not in svc:
                 errors.append(f"{where} ('{name}'): missing key '{key}'")
+
+        driver = svc.get("driver")
+        if driver is not None and not isinstance(driver, str):
+            errors.append(f"{where} ('{name}'): 'driver' must be a string")
 
         prio = svc.get("priority")
         if prio is not None and not isinstance(prio, int):

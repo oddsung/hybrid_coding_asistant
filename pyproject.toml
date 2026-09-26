@@ -1,15 +1,17 @@
 [project]
 name = "free-llm-coder"
-version = "0.1.0"
-description = "A CLI tool to automate free LLM web services for coding assistance"
+version = "0.2.0"
+description = "A CLI tool and OpenAI-compatible server that automate free LLM web services for coding assistance"
 authors = [
-    {name = "User", email = "user@example.com"},
+    {name = "oddsung", email = "wyedu10@wooyang.co.kr"},
 ]
 dependencies = [
     "playwright>=1.40.0",
     "typer>=0.9.0",
     "rich>=13.0.0",
     "pyyaml>=6.0",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
 ]
 requires-python = ">=3.10"
 
@@ -17,6 +19,10 @@ requires-python = ">=3.10"
 dev = ["pytest>=7.0"]
 
 [project.scripts]
+# NOTE: `fc` is kept for compatibility but collides with the zsh/bash builtin
+# of the same name (history "fix command"); interactive shells run the builtin
+# instead. Use `flc` (or `command fc`).
+flc = "free_llm_coder.main:app"
 fc = "free_llm_coder.main:app"
 free-llm-coder = "free_llm_coder.main:app"
 

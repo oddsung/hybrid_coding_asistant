@@ -1,3 +1,4 @@
 [console_scripts]
 fc = free_llm_coder.main:app
+flc = free_llm_coder.main:app
 free-llm-coder = free_llm_coder.main:app

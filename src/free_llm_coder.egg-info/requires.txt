@@ -2,3 +2,8 @@ playwright>=1.40.0
 typer>=0.9.0
 rich>=13.0.0
 pyyaml>=6.0
+fastapi>=0.110
+uvicorn>=0.27
+
+[dev]
+pytest>=7.0

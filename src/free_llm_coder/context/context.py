@@ -35,7 +35,27 @@ _OUTPUT_RULES = (
 
 
 class ContextManager:
-    def __init__(self, root_path: str = ".", config: Optional[dict] = None):
+    """Builds prompts for the web services.
+
+    ``mode`` selects what a prompt contains:
+
+    - ``"code"``: coding assistant. Structured output rules + budgeted project
+      file context (full on a service's first prompt, changed files after).
+    - ``"chat"``: general-purpose Q&A. The user's question is sent verbatim --
+      no rules, no project files. Web LLMs are already general assistants, so
+      no instructions are needed at all.
+
+    What has been sent is tracked **per service**: when rotation switches to a
+    service mid-session, that service still gets the full project context on
+    its first prompt. Files are only recorded as sent once :meth:`commit` is
+    called (after a successful exchange), so a failed attempt re-sends them.
+    """
+
+    def __init__(self, root_path: str = ".", config: Optional[dict] = None,
+                 mode: str = "code"):
+        if mode not in ("code", "chat"):
+            raise ValueError(f"unknown mode '{mode}' (expected 'code' or 'chat')")
+        self.mode = mode
         self.root_path = Path(root_path).resolve()
         self.ignore_patterns = self._load_gitignore()
         # Default ignore patterns
@@ -45,12 +65,15 @@ class ContextManager:
         ])
 
         ctx_cfg = (config or {}).get("context", {}) or {}
-        self.max_files = ctx_cfg.get("max_files", 20)
-        self.max_chars = ctx_cfg.get("max_chars", 40000)
+        # Fallbacks mirror config_schema.DEFAULT_CONTEXT.
+        self.max_files = ctx_cfg.get("max_files", 25)
+        self.max_chars = ctx_cfg.get("max_chars", 60000)
 
-        # Maps an absolute file path to the mtime it had when it was last
-        # included in a prompt. Used to send only changed files on later turns.
+        # Per-service map of {absolute path: mtime when last sent}. Only
+        # changed files are re-sent to a service on its later turns.
         self.sent_files: dict = {}
+        # Files staged by build_prompt but not yet confirmed delivered.
+        self._pending: dict = {}
 
     def reset(self):
         """Forget what has been sent so the next prompt rebuilds full context.
@@ -58,6 +81,17 @@ class ContextManager:
         Call this when the chat session is reset (e.g. the ``/new`` command).
         """
         self.sent_files = {}
+        self._pending = {}
+
+    def commit(self, service: str = "default"):
+        """Record the staged files as actually delivered to ``service``.
+
+        Call after a successful exchange; skipping it on failure means the
+        next attempt re-sends the same files instead of assuming they arrived.
+        """
+        staged = self._pending.pop(service, None)
+        if staged:
+            self.sent_files.setdefault(service, {}).update(staged)
 
     def _load_gitignore(self) -> List[str]:
         """Load patterns from .gitignore. Trailing slashes (directory form,
@@ -89,7 +123,7 @@ class ContextManager:
                     return True
         return False
 
-    def scan_files(self, max_depth: int = 3) -> List[Path]:
+    def scan_files(self, max_depth: int = 5) -> List[Path]:
         found_files = []
         for root, dirs, files in os.walk(self.root_path):
             # Modify dirs in-place to skip ignored directories
@@ -164,22 +198,25 @@ class ContextManager:
 
         return "\n".join(parts), included
 
-    def _mark_sent(self, files: List[Path]):
+    def _stage_sent(self, service: str, files: List[Path]):
+        staged = self._pending.setdefault(service, {})
         for fp in files:
             try:
-                self.sent_files[fp] = fp.stat().st_mtime
+                staged[fp] = fp.stat().st_mtime
             except OSError:
                 pass
 
-    def _changed_files(self, files: List[Path]) -> List[Path]:
-        """Files that are new or whose mtime advanced since they were last sent."""
+    def _changed_files(self, files: List[Path], service: str) -> List[Path]:
+        """Files that are new or whose mtime advanced since they were last
+        sent to ``service``."""
+        sent = self.sent_files.get(service, {})
         changed = []
         for fp in files:
             try:
                 mtime = fp.stat().st_mtime
             except OSError:
                 continue
-            prev = self.sent_files.get(fp)
+            prev = sent.get(fp)
             if prev is None or mtime > prev:
                 changed.append(fp)
         return changed
@@ -187,11 +224,11 @@ class ContextManager:
     def _system_info(self) -> str:
         return f"OS: {platform.system()} {platform.release()}\nCurrent Directory: {self.root_path}"
 
-    def build_initial_prompt(self, user_query: str) -> str:
-        """First turn: full output rules + budgeted project context."""
+    def build_initial_prompt(self, user_query: str, service: str = "default") -> str:
+        """A service's first turn: full output rules + budgeted project context."""
         files = self.scan_files()
         context_str, included = self._build_context_section(files, limit_count=True)
-        self._mark_sent(included)
+        self._stage_sent(service, included)
 
         return (
             "You are an automated AI coding assistant. \n"
@@ -203,14 +240,14 @@ class ContextManager:
             f"User Question: {user_query}"
         )
 
-    def build_followup_prompt(self, user_query: str) -> str:
-        """Later turns: only changed/new files (the web chat keeps history)."""
+    def build_followup_prompt(self, user_query: str, service: str = "default") -> str:
+        """Later turns: only files changed since this service last saw them."""
         files = self.scan_files()
-        changed = self._changed_files(files)
+        changed = self._changed_files(files, service)
 
         if changed:
             context_str, included = self._build_context_section(changed, limit_count=False)
-            self._mark_sent(included)
+            self._stage_sent(service, included)
             context_block = (
                 "--- Updated / New Project Files ---\n"
                 f"{context_str}\n\n"
@@ -224,8 +261,16 @@ class ContextManager:
 
         return f"{context_block}User Question: {user_query}"
 
-    def build_prompt(self, user_query: str) -> str:
-        """Build a prompt, full on the first turn and incremental afterwards."""
-        if not self.sent_files:
-            return self.build_initial_prompt(user_query)
-        return self.build_followup_prompt(user_query)
+    def build_prompt(self, user_query: str, service: str = "default") -> str:
+        """Build the prompt to send to ``service`` for this turn.
+
+        Chat mode sends the question verbatim. Code mode sends the full
+        rules-plus-context prompt on the service's first turn and an
+        incremental one afterwards -- per service, so a rotation target
+        that never saw the project still receives everything.
+        """
+        if self.mode == "chat":
+            return user_query
+        if not self.sent_files.get(service):
+            return self.build_initial_prompt(user_query, service)
+        return self.build_followup_prompt(user_query, service)

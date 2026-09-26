@@ -8,12 +8,23 @@ class GeminiDriver(BaseDriver):
         selectors = self.config['selectors']
         # Wait for input area
         self.page.wait_for_selector(selectors['input_area'])
-        
-        # Focus and Type
-        self.page.click(selectors['input_area'])
-        self.page.keyboard.type(message)
+
+        # fill() works on contenteditable elements and inserts the whole
+        # message at once -- keyboard.type would take minutes for a large
+        # project context. Fall back to insertText for editors fill can't handle.
+        try:
+            self.page.fill(selectors['input_area'], message)
+        except Exception:
+            self.page.click(selectors['input_area'])
+            self.page.evaluate(
+                """(msg) => {
+                    document.execCommand('selectAll', false, null);
+                    document.execCommand('insertText', false, msg);
+                }""",
+                message,
+            )
         time.sleep(1)
-        
+
         # Click submit
         self.page.click(selectors['submit_button'])
 

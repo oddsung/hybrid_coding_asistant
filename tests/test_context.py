@@ -40,10 +40,12 @@ def test_initial_prompt_full_followup_incremental(tmp_path):
     cm = ContextManager(str(tmp_path), config={"context": {"max_files": 10, "max_chars": 10000}})
 
     p1 = cm.build_prompt("hello")
+    cm.commit()
     assert "STRICT OUTPUT RULES" in p1
     assert "a.py" in p1 and "b.py" in p1 and "sub/c.py" in p1
 
     p2 = cm.build_prompt("still hello")
+    cm.commit()
     assert "No project files changed" in p2
     assert "STRICT OUTPUT RULES" not in p2
 
@@ -55,10 +57,47 @@ def test_initial_prompt_full_followup_incremental(tmp_path):
     assert "a.py" not in p3
 
 
+def test_uncommitted_context_is_resent(tmp_path):
+    """A failed attempt (no commit) must not count as delivered."""
+    _seed_project(tmp_path)
+    cm = ContextManager(str(tmp_path))
+    cm.build_prompt("first try")          # no commit: the send failed
+    p_retry = cm.build_prompt("retry")
+    assert "STRICT OUTPUT RULES" in p_retry
+    assert "a.py" in p_retry
+
+
+def test_context_is_tracked_per_service(tmp_path):
+    """A rotation target that never saw the project gets full context."""
+    _seed_project(tmp_path)
+    cm = ContextManager(str(tmp_path))
+
+    cm.build_prompt("hello", service="chatgpt")
+    cm.commit("chatgpt")
+
+    # Same conversation moves to gemini: full context again.
+    p_gemini = cm.build_prompt("hello again", service="gemini")
+    assert "STRICT OUTPUT RULES" in p_gemini
+    assert "a.py" in p_gemini
+
+    # chatgpt stays incremental.
+    p_chatgpt = cm.build_prompt("hello again", service="chatgpt")
+    assert "No project files changed" in p_chatgpt
+
+
+def test_chat_mode_sends_question_verbatim(tmp_path):
+    _seed_project(tmp_path)
+    cm = ContextManager(str(tmp_path), mode="chat")
+    assert cm.build_prompt("김치찌개 맛있게 끓이는 법?") == "김치찌개 맛있게 끓이는 법?"
+    # No file context, no rules, regardless of service or turn count.
+    assert cm.build_prompt("두 번째 질문", service="gemini") == "두 번째 질문"
+
+
 def test_reset_returns_to_initial(tmp_path):
     _seed_project(tmp_path)
     cm = ContextManager(str(tmp_path))
     cm.build_prompt("first")
+    cm.commit()
     cm.reset()
     p = cm.build_prompt("again")
     assert "STRICT OUTPUT RULES" in p
