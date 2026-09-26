@@ -36,6 +36,18 @@ def test_priority_sort_and_preferred_moves_to_front():
     assert sm2.services_config[0]["name"] == "grok"
 
 
+def test_per_service_headless_overrides_global():
+    cfg = _cfg()
+    cfg["browser"]["headless"] = True
+    cfg["services"][0]["headless"] = False   # e.g. chatgpt bot-checks headless
+    sm = ServiceManager(cfg)
+
+    d0 = sm._create_driver(sm.services_config[0])
+    d1 = sm._create_driver(sm.services_config[1])
+    assert d0.headless is False
+    assert d1.headless is True
+
+
 def test_select_service_honors_breaker_and_unknown_names():
     sm = ServiceManager(_cfg())
     sm.reset_rotation()

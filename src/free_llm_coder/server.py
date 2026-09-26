@@ -28,6 +28,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
@@ -38,6 +39,9 @@ from .manager.service_manager import ServiceManager
 from .logging_setup import get_logger
 
 log = get_logger("server")
+
+# Failure screenshots land here (see BaseDriver.save_debug_snapshot).
+SNAPSHOT_DIR = Path.home() / ".free-llm-coder" / "logs" / "snapshots"
 
 # How long a non-streaming request waits for the browser exchange to finish.
 REQUEST_TIMEOUT = 600
@@ -83,6 +87,21 @@ def extract_prompt(messages: list) -> tuple[str, bool]:
         if system_text:
             prompt = f"[System Instructions]\n{system_text}\n\n{prompt}"
     return prompt, new_conversation
+
+
+def parse_model_id(model, service_names: list) -> tuple:
+    """Parse an OpenAI ``model`` field into ``(service, model_name)``.
+
+    Accepted forms: ``auto`` (None, None), ``<service>``, and
+    ``<service>/<model>`` -- e.g. ``qwen/Qwen3.8-Max`` picks that model in
+    Qwen's live model menu. Raises ValueError for an unknown service.
+    """
+    if not model or model == "auto":
+        return None, None
+    service, _, model_name = str(model).partition("/")
+    if service not in service_names:
+        raise ValueError(f"unknown model '{model}'")
+    return service, (model_name or None)
 
 
 def conversation_fingerprint(messages: list) -> str:
@@ -143,6 +162,7 @@ class ChatJob:
     messages: list                  # the request's OpenAI message list
     service: Optional[str]          # None = auto (priority order)
     new_chat: bool                  # request contains no assistant messages
+    model: Optional[str] = None     # model to pick in the service's live menu
     updates: "queue.Queue[Optional[str]]" = field(default_factory=queue.Queue)
     done: threading.Event = field(default_factory=threading.Event)
     result: Optional[tuple] = None  # (service_name, response_text)
@@ -166,6 +186,9 @@ class ChatWorker:
         self._conv_fp: Optional[str] = None
         self._conv_len = 0
         self._seen: dict = {}       # service name -> messages known to it
+        # Models discovered live per service (populated lazily after a
+        # service's first successful exchange; read by GET /v1/models).
+        self.discovered_models: dict = {}
         self.thread = threading.Thread(target=self._run, name="chat-worker", daemon=True)
         self.thread.start()
 
@@ -187,6 +210,28 @@ class ChatWorker:
             finally:
                 job.done.set()
                 job.updates.put(None)  # end-of-stream sentinel
+            # After the response is out the door: read the model menu of the
+            # service that just answered, once, so /v1/models can list its
+            # concrete models (never blocks a pending response).
+            try:
+                self._discover_models(svc_mgr, job)
+            except Exception:
+                log.debug("model discovery failed", exc_info=True)
+
+    def _discover_models(self, svc_mgr: ServiceManager, job: ChatJob):
+        if not job.result:
+            return
+        service_name = job.result[0]
+        if service_name in self.discovered_models:
+            return
+        driver = svc_mgr.drivers.get(service_name)
+        if driver is None or not driver.supports_picker("model"):
+            return
+        models = [it["name"] for it in driver.list_models()]
+        if models:
+            self.discovered_models[service_name] = models
+            log.info("discovered %d models on '%s': %s",
+                     len(models), service_name, ", ".join(models))
 
     def _sync_conversation(self, job: ChatJob):
         """Reset per-service tracking when the active conversation changed.
@@ -221,6 +266,7 @@ class ChatWorker:
         while attempts < max_total_attempts:
             attempts += 1
             service_name = "unknown"
+            driver = None
             try:
                 driver, service_name = svc_mgr.get_active()
                 log.info("processing prompt via '%s' (attempt %d)", service_name, attempts)
@@ -232,10 +278,21 @@ class ChatWorker:
                 if seen == 0:
                     driver.new_chat()
 
+                # Apply the requested model (only meaningful on the service
+                # it belongs to). A miss falls back to the current model.
+                if (job.model and service_name == job.service
+                        and driver.current_model != job.model):
+                    if not driver.select_model(job.model):
+                        log.warning("model '%s' not found on '%s'; using its current model",
+                                    job.model, service_name)
+
                 driver.send_message(prompt)
                 response = driver.wait_for_response(on_update=job.updates.put)
 
-                if driver.is_limit_reached():
+                limit_kind = driver.detect_limit()
+
+                # No answer AND limit evidence: rotate and retry this prompt.
+                if limit_kind and not response:
                     log.info("limit reached on '%s'; rotating", service_name)
                     svc_mgr.rotate_service()
                     empty_retries = 0
@@ -254,7 +311,14 @@ class ChatWorker:
                         time.sleep(2)
                     continue
 
-                svc_mgr.mark_success()
+                # A completed answer is never discarded: strong limit evidence
+                # cools this service down for later prompts, a weak generic-
+                # keyword hint is ignored (pages quote such phrases legitimately).
+                if limit_kind in ("selector", "service_keyword"):
+                    log.info("'%s' reports a usage limit; keeping answer, cooling down", service_name)
+                    svc_mgr.mark_limited()
+                else:
+                    svc_mgr.mark_success()
                 # This service now knows every request message plus the
                 # answer it just gave (which the front-end will echo back
                 # as the next request's assistant message).
@@ -264,6 +328,8 @@ class ChatWorker:
 
             except Exception as e:
                 log.warning("error with '%s': %s", service_name, e)
+                if driver is not None:
+                    driver.save_debug_snapshot(SNAPSHOT_DIR)
                 svc_mgr.rotate_service()
                 if svc_mgr.is_exhausted():
                     break
@@ -368,7 +434,11 @@ def create_app(config: dict) -> FastAPI:
 
     @app.get("/v1/models")
     def list_models():
+        # Static entries plus the concrete models discovered live on each
+        # service (populated after that service's first exchange).
         names = ["auto"] + service_names
+        for svc, models in worker.discovered_models.items():
+            names.extend(f"{svc}/{m}" for m in models)
         return {
             "object": "list",
             "data": [
@@ -387,15 +457,16 @@ def create_app(config: dict) -> FastAPI:
             raise HTTPException(status_code=400, detail="'messages' must be a non-empty list")
 
         model = payload.get("model") or "auto"
-        service = None if model == "auto" else model
-        if service and service not in service_names:
-            raise HTTPException(status_code=404, detail=f"unknown model '{model}'")
+        try:
+            service, model_name = parse_model_id(model, service_names)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
 
         prompt, new_chat = extract_prompt(messages)
         if not prompt.strip():
             raise HTTPException(status_code=400, detail="no user message found")
 
-        job = ChatJob(messages=messages, service=service, new_chat=new_chat)
+        job = ChatJob(messages=messages, service=service, new_chat=new_chat, model=model_name)
         worker.submit(job)
 
         if payload.get("stream"):

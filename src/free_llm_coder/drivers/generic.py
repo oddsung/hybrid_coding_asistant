@@ -27,15 +27,6 @@ from ..logging_setup import get_logger
 
 log = get_logger("driver.generic")
 
-# Inserts text into a focused contenteditable editor. Used when page.fill
-# cannot handle the input element (custom rich-text editors).
-_INSERT_TEXT_JS = """
-    (msg) => {
-        document.execCommand('selectAll', false, null);
-        document.execCommand('insertText', false, msg);
-    }
-"""
-
 
 class GenericDriver(BaseDriver):
     def send_message(self, message: str) -> None:
@@ -46,15 +37,9 @@ class GenericDriver(BaseDriver):
 
         self.page.wait_for_selector(input_selector, timeout=15000)
 
-        # fill() handles <textarea>, <input> and [contenteditable]; custom
-        # editors that reject it get the insertText fallback.
-        try:
-            self.page.fill(input_selector, message)
-        except Exception:
-            log.debug("[%s] fill failed; falling back to insertText",
-                      self.config.get('name', '?'))
-            self.page.click(input_selector)
-            self.page.evaluate(_INSERT_TEXT_JS, message)
+        # Verified insert_text path from BaseDriver: works for <textarea> and
+        # rich contenteditable editors alike, without mangling Hangul/CJK.
+        self.type_message(input_selector, message)
         time.sleep(0.5)
 
         # Prefer the configured submit button; if the click did not actually

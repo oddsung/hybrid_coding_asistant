@@ -32,6 +32,13 @@ def test_validate_detects_duplicate_priority():
     assert any("duplicate priority" in e for e in errors)
 
 
+def test_validate_rejects_non_bool_service_headless():
+    cfg = build_default_config()
+    cfg["services"][0]["headless"] = "yes"
+    errors = validate_config(cfg)
+    assert any("headless" in e for e in errors)
+
+
 def test_validate_rejects_non_positive_context_values():
     cfg = build_default_config()
     cfg["context"]["max_files"] = 0

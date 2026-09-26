@@ -3,9 +3,10 @@ from .base import BaseDriver
 
 class QwenDriver(BaseDriver):
     # Qwen renders assistant replies inside .qwen-chat-message-assistant only,
-    # so count those to avoid counting the user's own messages.
+    # so count those to avoid counting the user's own messages. (The bubble
+    # appears immediately with a loading spinner, before any markdown child.)
     def _response_count_selector(self) -> str:
-        return ".qwen-chat-message-assistant .qwen-markdown"
+        return ".qwen-chat-message-assistant"
 
     def send_message(self, message: str):
         # Snapshot response count so wait_for_response can detect this turn's reply.
@@ -13,20 +14,26 @@ class QwenDriver(BaseDriver):
         selectors = self.config['selectors']
         # Wait for input area
         self.page.wait_for_selector(selectors['input_area'])
-        
-        # Fill message
-        self.page.fill(selectors['input_area'], message)
+
+        # Verified insert (IME-safe); also dismisses the cookie banner that
+        # otherwise intercepts clicks page-wide.
+        self.type_message(selectors['input_area'], message)
         time.sleep(1) # Small delay
-        
+
         # Click submit
         self.page.click(selectors['submit_button'])
         time.sleep(2) # Wait for UI to transition to 'generating' state (stop button to appear)
 
     def get_last_response(self) -> str:
-        # Use more specific selector to avoid user messages
-        # Qwen's latest assistant message container is .qwen-chat-message-assistant
-        selector = ".qwen-chat-message-assistant .qwen-markdown"
-        
+        # Prefer the Monaco-aware extractor on the markdown body (preserves
+        # code fences); if the UI dropped the .qwen-markdown class, fall back
+        # to the generic walker over the whole assistant bubble.
+        text = self._extract_markdown(".qwen-chat-message-assistant .qwen-markdown")
+        if text:
+            return text
+        return self._extract_last_response(".qwen-chat-message-assistant")
+
+    def _extract_markdown(self, selector: str) -> str:
         return self.page.evaluate("""
             (selector) => {
                 const responses = document.querySelectorAll(selector);

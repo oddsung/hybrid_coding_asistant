@@ -27,6 +27,22 @@ COMMON_LIMIT_KEYWORDS = [
     "请求过于频繁",
 ]
 
+# Text fragments that signal a human-verification challenge (slider captcha,
+# "verify you are human", ...). The tool never tries to defeat these; it
+# detects them so it can fail fast in headless mode (rotate to another
+# service) or tell the user to complete the check in the visible window.
+COMMON_CHALLENGE_KEYWORDS = [
+    "drag the slider",
+    "슬라이더를 드래그",
+    "밀어서 확인",
+    "인증을 완료해",
+    "安全验证",
+    "verify you are human",
+    "i'm not a robot",
+    "unusual activity",
+    "captcha",
+]
+
 DEFAULT_BROWSER = {"headless": False}
 
 DEFAULT_CONTEXT = {
@@ -53,6 +69,11 @@ DEFAULT_SERVICES = {
             "submit_button": "button[data-testid='send-button']",
             "response_container": ".markdown",
             "error_message": ".text-red-500",
+            # No model_menu: the Free-tier ChatGPT UI has no model picker
+            # (only a "Think" toggle). Plus accounts can enable /models by
+            # adding e.g.:
+            #   model_menu: "button[data-testid='model-switcher-dropdown-button']"
+            # after verifying it with `flc doctor -s chatgpt`.
         },
         "limit_indicators": {
             "selectors": [],
@@ -65,9 +86,14 @@ DEFAULT_SERVICES = {
         "priority": 2,
         "selectors": {
             "input_area": "div[contenteditable='true']",
-            "submit_button": "button[aria-label='Send message']",
+            # aria-labels are localized (Korean UI says something else), so
+            # prefer the stable class and keep the label as an alternative.
+            "submit_button": "button.send-button, button[aria-label='Send message']",
             "response_container": "model-response",
             "error_message": None,
+            # Model picker in the composer ("Flash-Lite ⌄"); verified live.
+            "model_menu": "button.input-area-switch",
+            "model_item": "[role='menuitem']",
         },
         "limit_indicators": {
             "selectors": [],
@@ -79,11 +105,20 @@ DEFAULT_SERVICES = {
         "url": "https://chat.qwen.ai",
         "priority": 3,
         "selectors": {
-            "input_area": "#chat-input",
+            # 2026-09 UI: the input lost its #chat-input id; keep the old
+            # selector as a comma-alternative for older deployments.
+            "input_area": "textarea.message-input-textarea, #chat-input",
             "submit_button": ".send-button",
-            "response_container": ".qwen-markdown",
+            "response_container": ".qwen-chat-message-assistant",
             "error_message": None,
+            # Model picker (top bar) and composer mode/tool menu; verified live.
+            "model_menu": "[aria-label='Select Model']",
+            "model_item": "[role='option']",
+            "mode_menu": ".mode-select-open",
+            "mode_item": "[role='menuitem']",
         },
+        # Qwen's cookie-consent banner intercepts clicks page-wide.
+        "dismiss_selectors": ["text=필수 쿠키만 사용"],
         "limit_indicators": {
             "selectors": [],
             "keywords": [],
@@ -142,7 +177,7 @@ DEFAULT_SERVICES = {
     # selectors with `flc doctor -s kimi` after logging in.
     "kimi": {
         "name": "kimi",
-        "url": "https://www.kimi.com",
+        "url": "https://www.kimi.ai",
         "priority": 7,
         "driver": "generic",
         "selectors": {
@@ -214,6 +249,17 @@ def validate_config(config: dict) -> List[str]:
         driver = svc.get("driver")
         if driver is not None and not isinstance(driver, str):
             errors.append(f"{where} ('{name}'): 'driver' must be a string")
+
+        svc_headless = svc.get("headless")
+        if svc_headless is not None and not isinstance(svc_headless, bool):
+            errors.append(f"{where} ('{name}'): 'headless' must be true or false")
+
+        dismiss = svc.get("dismiss_selectors")
+        if dismiss is not None and (
+            not isinstance(dismiss, list)
+            or not all(isinstance(s, str) for s in dismiss)
+        ):
+            errors.append(f"{where} ('{name}'): 'dismiss_selectors' must be a list of strings")
 
         prio = svc.get("priority")
         if prio is not None and not isinstance(prio, int):

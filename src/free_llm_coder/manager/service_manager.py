@@ -70,6 +70,21 @@ class ServiceManager:
             breaker['opened_at'] = time.time()
             log.info("circuit opened for '%s' (cooldown %ss)", name, COOLDOWN_SECONDS)
 
+    def mark_limited(self, name: Optional[str] = None):
+        """Open the breaker for ``name`` (default: the active service) right
+        away: a confirmed usage limit means further prompts there are
+        pointless until the cooldown elapses. Unlike :meth:`rotate_service`
+        this does not close the driver -- the session stays warm for later."""
+        if name is None:
+            if self.active_service_index >= len(self.services_config):
+                return
+            name = self.services_config[self.active_service_index]['name']
+        breaker = self.breakers.get(name)
+        if breaker is not None:
+            breaker['state'] = 'open'
+            breaker['opened_at'] = time.time()
+            log.info("service '%s' marked limited (cooldown %ss)", name, COOLDOWN_SECONDS)
+
     def record_success(self, name: str):
         """Reset a service's breaker after a successful exchange."""
         breaker = self.breakers.get(name)
@@ -121,7 +136,11 @@ class ServiceManager:
         name = service_cfg['name']
         user_data_dir = f"{self.user_data_base}/{name}"
         driver_cls = resolve_driver_class(service_cfg)
-        return driver_cls(service_cfg, user_data_dir, self.headless)
+        # Per-service headless override: sites differ in how aggressively
+        # they bot-check headless browsers, so e.g. chatgpt can stay headful
+        # while the rest run hidden.
+        headless = service_cfg.get('headless', self.headless)
+        return driver_cls(service_cfg, user_data_dir, headless)
 
     def get_active_driver(self) -> BaseDriver:
         """Returns the current active driver, initializing it if necessary."""
@@ -136,6 +155,12 @@ class ServiceManager:
             driver = self._create_driver(current_cfg)
             driver.start_browser(self._get_playwright())
             driver.navigate()
+            if driver.login_required():
+                driver.close()
+                raise RuntimeError(
+                    f"'{name}' redirected to its login page -- session missing "
+                    f"or expired. Run: flc login {name}"
+                )
             self.drivers[name] = driver
 
         return self.drivers[name]

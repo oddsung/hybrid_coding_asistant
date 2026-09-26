@@ -4,12 +4,15 @@ The FastAPI app itself needs a browser worker, so these tests target the
 message-to-prompt conversion, payload shapes, and stream-delta logic that the
 endpoints are built from -- all browser-free.
 """
+import pytest
+
 from free_llm_coder.server import (
     extract_prompt,
     completion_json,
     stream_delta,
     build_service_prompt,
     conversation_fingerprint,
+    parse_model_id,
 )
 
 
@@ -114,6 +117,24 @@ def test_completion_json_matches_openai_shape():
     assert choice["message"] == {"role": "assistant", "content": "answer"}
     assert choice["finish_reason"] == "stop"
     assert "usage" in payload
+
+
+# ------------------------------ model id parsing --------------------------- #
+_NAMES = ["chatgpt", "qwen"]
+
+
+def test_parse_model_id_forms():
+    assert parse_model_id("auto", _NAMES) == (None, None)
+    assert parse_model_id(None, _NAMES) == (None, None)
+    assert parse_model_id("qwen", _NAMES) == ("qwen", None)
+    assert parse_model_id("qwen/Qwen3.8-Max", _NAMES) == ("qwen", "Qwen3.8-Max")
+
+
+def test_parse_model_id_rejects_unknown_service():
+    with pytest.raises(ValueError):
+        parse_model_id("nope/whatever", _NAMES)
+    with pytest.raises(ValueError):
+        parse_model_id("nope", _NAMES)
 
 
 # ------------------------------ stream deltas ------------------------------ #

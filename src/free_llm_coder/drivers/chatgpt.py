@@ -8,11 +8,13 @@ class ChatGPTDriver(BaseDriver):
         selectors = self.config['selectors']
         # Wait for input area
         self.page.wait_for_selector(selectors['input_area'])
-        
-        # Fill message
-        self.page.fill(selectors['input_area'], message)
+
+        # ChatGPT's input is a ProseMirror contenteditable; fill() mangles
+        # composed characters (Hangul/CJK) there, so use the verified
+        # insert_text path from BaseDriver.
+        self.type_message(selectors['input_area'], message)
         time.sleep(1) # Small delay
-        
+
         # Click submit
         self.page.click(selectors['submit_button'])
 
@@ -52,13 +54,17 @@ class ChatGPTDriver(BaseDriver):
         """, selectors['response_container'])
 
     def is_streaming_finished(self) -> bool:
-        """ChatGPT specific: Wait until the send button appears/is enabled logic."""
-        selectors = self.config['selectors']
-        submit_btn = selectors['submit_button']
-        
-        # Simple check: Can we find the send button enabled?
-        # In ChatGPT, when generating, the button is usually a 'Stop' button or hidden/disabled.
-        btn = self.page.query_selector(submit_btn)
-        if btn and not btn.is_disabled():
-            return True
-        return False
+        """ChatGPT specific: the stop button exists only WHILE generating.
+
+        The send button is not a reliable "finished" signal: with an empty
+        composer ChatGPT shows a voice button instead, so waiting for the
+        send button after a completed answer stalls until the timeout.
+        """
+        if self.page.query_selector("button[data-testid='stop-button']"):
+            return False
+        btn = self.page.query_selector(self.config['selectors']['submit_button'])
+        if btn is not None:
+            return not btn.is_disabled()
+        # No stop and no send button (empty composer after completion):
+        # treat as finished and let the text-stability window decide.
+        return True
