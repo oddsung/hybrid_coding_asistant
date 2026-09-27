@@ -128,6 +128,8 @@ DEFAULT_SERVICES = {
         "name": "grok",
         "url": "https://grok.com",
         "priority": 4,
+        # Reject optional cookies so the banner stops intercepting clicks.
+        "dismiss_selectors": ["text=모두 거부", "text=Reject all"],
         "selectors": {
             "input_area": "textarea",
             "submit_button": "button.group.flex.flex-col.justify-center.rounded-full",

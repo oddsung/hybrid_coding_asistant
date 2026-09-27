@@ -761,18 +761,24 @@ def status(
 
             if driver.login_required():
                 state = f"[red]login needed -- run: flc login {name}[/red]"
+            elif driver.manual_gate_required():
+                state = f"[red]consent/terms page pending -- run: flc login {name} and confirm it[/red]"
             elif driver._challenge_visible():
                 state = "[red]human verification pending -- open it headful and complete the check[/red]"
             else:
+                # Visibility matters: some pages keep a hidden decoy textarea
+                # (e.g. behind a blocking overlay), which mere existence
+                # checks would wrongly report as usable.
                 input_sel = (cfg.get('selectors') or {}).get('input_area')
                 try:
-                    found = bool(input_sel and driver.page.query_selector(input_sel))
+                    el = input_sel and driver.page.query_selector(input_sel)
+                    found = bool(el and el.is_visible())
                 except Exception:
                     found = False
                 if found:
-                    state = "[green]ready (chat input reachable)[/green]"
+                    state = "[green]ready (chat input visible)[/green]"
                 else:
-                    state = f"[yellow]input selector not found -- check with: flc doctor -s {name}[/yellow]"
+                    state = f"[yellow]input not visible -- check with: flc doctor -s {name}[/yellow]"
         except Exception as e:
             if "ProcessSingleton" in str(e):
                 state = "[blue]in use by another process (flc chat/serve running)[/blue]"

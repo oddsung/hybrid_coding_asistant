@@ -155,11 +155,22 @@ class ServiceManager:
             driver = self._create_driver(current_cfg)
             driver.start_browser(self._get_playwright())
             driver.navigate()
+            # Login walls and consent gates persist until a human acts, so
+            # retrying them within the cooldown is pure waste (a full browser
+            # launch each time): open the breaker right away.
             if driver.login_required():
                 driver.close()
+                self.mark_limited(name)
                 raise RuntimeError(
                     f"'{name}' redirected to its login page -- session missing "
                     f"or expired. Run: flc login {name}"
+                )
+            if driver.manual_gate_required():
+                driver.close()
+                self.mark_limited(name)
+                raise RuntimeError(
+                    f"'{name}' is showing a consent/terms page that needs a "
+                    f"human click. Run: flc login {name} and confirm it in the window."
                 )
             self.drivers[name] = driver
 

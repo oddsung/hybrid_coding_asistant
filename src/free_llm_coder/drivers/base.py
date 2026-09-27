@@ -9,6 +9,10 @@ from typing import Optional
 # URL fragments that mean the service bounced us to a login page.
 _LOGIN_URL_RE = re.compile(r"(sign[-_]?in|/login|/auth\b|accounts\.google)", re.IGNORECASE)
 
+# URL fragments for blocking consent/terms gates (e.g. grok.com/tos-gate).
+# These need a human acknowledgement; the tool never auto-accepts legal terms.
+_GATE_URL_RE = re.compile(r"(tos[-_]?gate|terms[-_]?gate|/consent\b)", re.IGNORECASE)
+
 # Menu entries once a model/mode picker is open. Services can override via
 # selectors.model_item / selectors.mode_item.
 _DEFAULT_PICKER_ITEM_SELECTOR = "[role='option'], [role='menuitem'], [role='menuitemradio']"
@@ -282,6 +286,14 @@ class BaseDriver(ABC):
         """True when the page was redirected to a login/sign-in URL."""
         try:
             return bool(_LOGIN_URL_RE.search(self.page.url or ""))
+        except Exception:
+            return False
+
+    def manual_gate_required(self) -> bool:
+        """True when the page is a blocking consent/terms gate that a human
+        must acknowledge (updated ToS etc.). Never auto-accepted."""
+        try:
+            return bool(_GATE_URL_RE.search(self.page.url or ""))
         except Exception:
             return False
 
